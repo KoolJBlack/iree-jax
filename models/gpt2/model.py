@@ -84,10 +84,10 @@ def init(L, E, F, Q, H, V, dtype):
   return (wte, wpe, layer_params, (fnorm_scale, fnorm_bias))
 
 
-def init_kv(B, S, L, Q, H, dtype, abstract=False):
+def init_kv(B, W, S, L, Q, H, dtype, abstract=False):
   if abstract:
-    return [abstract_arrays.ShapedArray((2, B, S, H, Q), dtype=dtype) for l in range(L)]
-  return [jnp.zeros((2, B, S, H, Q), dtype=dtype) for l in range(L)]
+    return [abstract_arrays.ShapedArray((2, B, W, S, H, Q), dtype=dtype) for l in range(L)]
+  return [jnp.zeros((2, B, W, S, H, Q), dtype=dtype) for l in range(L)]
 
 
 def fprop_layer(params, kv, x, t0, i, mask):
@@ -100,41 +100,42 @@ def fprop_layer(params, kv, x, t0, i, mask):
    (w_o, w_o_bias)) = params
   # x = with_sharding_constraint(x, x_sharding)
   xnorm = jax.nn.normalize(x) * xnorm_scale + xnorm_bias
-  qkv = jnp.einsum('bte,ihqe->ibthq', xnorm, wqkv) + wqkv_bias[:, None, None]
+  qkv = jnp.einsum('bwte,ihqe->ibwthq', xnorm, wqkv)
+  qkv = qkv + wqkv_bias[:, None, None, None]
   q, new_kv = qkv[0], qkv[1:]
   if i is not None:
     # "encoding" a single prefix
     if mask is not None:
-      new_kv = mask[None, :, :, None, None] * new_kv
-      q = q * mask[:, :, None, None]
-    kv = jax.lax.dynamic_update_slice(kv, new_kv, [0, i, 0, 0, 0])
-    k, v = jax.lax.dynamic_slice(kv, [0, i, 0, 0, 0], [2, x.shape[0], *kv.shape[2:]])
+      new_kv = mask[None, :, :, :, None, None] * new_kv
+      q = q * mask[:, :, :, None, None]
+    kv = jax.lax.dynamic_update_slice(kv, new_kv, [0, i, 0, 0, 0, 0])
+    k, v = jax.lax.dynamic_slice(kv, [0, i, 0, 0, 0, 0], [2, new_kv.shape[1], new_kv.shape[2], *kv.shape[3:]])
   elif t0 is not None:
     # "decoding" a single timestep
     kv = jax.vmap(jax.lax.dynamic_update_slice,
-                  (1, 1, [None, 0, None, None]),
-                  1)(kv, new_kv, [0, t0, 0, 0])
+                  (1, 1, [None, None, 0, None, None]),
+                  1)(kv, new_kv, [0, 0, t0, 0, 0])
     k, v = kv
   else:
     # running a whole batch
     k, v = new_kv
-  outer = jnp.einsum('bthq,bshq->btsh', q, k) / jnp.asarray(
+  outer = jnp.einsum('bwthq,bwshq->bwtsh', q, k) / jnp.asarray(
       jnp.sqrt(v.shape[-1]), dtype=x.dtype)
   # s refers to timestep attended to; t refers to timestep attending
-  s = jnp.arange(outer.shape[2])[None, None, :]
-  t = (0 if t0 is None else t0[:, None, None]
-       ) + jnp.arange(outer.shape[1])[None, :, None]
+  s = jnp.arange(outer.shape[3])[None, None, None, :]
+  t = (0 if t0 is None else t0[:, None, None, None]
+       ) + jnp.arange(outer.shape[2])[None, None, :, None]
   if i is not None or t0 is not None:
     invalid = t < s
     outer = outer - jnp.asarray(
-        jnp.inf, dtype=x.dtype) * invalid[:, :, :, None]
-  alpha = jax.nn.softmax(outer, 2)
-  inner = jnp.einsum('btsh,bshq->bthq', alpha, v)
-  y = jnp.einsum('bthq,hqe->bte', inner, wo) + wo_bias + x
+        jnp.inf, dtype=x.dtype) * invalid[:, :, :, :, None]
+  alpha = jax.nn.softmax(outer, 3)
+  inner = jnp.einsum('bwtsh,bwshq->bwthq', alpha, v)
+  y = jnp.einsum('bwthq,hqe->bwte', inner, wo) + wo_bias + x
   # y = with_sharding_constraint(y, x_sharding)
   ynorm = jax.nn.normalize(y) * ynorm_scale + ynorm_bias
-  act = jax.nn.gelu(jnp.einsum('bte,ef->btf', ynorm, w_i) + w_i_bias)
-  z = jnp.einsum('btf,fe->bte', act, w_o) + w_o_bias + y
+  act = jax.nn.gelu(jnp.einsum('bwte,ef->bwtf', ynorm, w_i) + w_i_bias)
+  z = jnp.einsum('bwtf,fe->bwte', act, w_o) + w_o_bias + y
   # z = with_sharding_constraint(z, x_sharding)
   return kv, z
 
@@ -147,43 +148,73 @@ def embed(embedding, x):
 
 def fprop(params, kv, x, t0, i, mask):
   (wte, wpe, layer_params, (fnorm_scale, fnorm_bias)) = params
-  x = embed(wte, x) + embed(wpe, (0 if t0 is None else t0[:, None]
+  x = embed(wte, x) + embed(wpe, (0 if t0 is None else t0[:, None, None]
                                   ) + jnp.arange(
-                                      x.shape[1], dtype=x.dtype)[None, :])
+                                      x.shape[2], dtype=x.dtype)[None, None, :])
   if mask is not None:
-    x = jnp.where(mask[:, :, None], x, 0)
+    x = jnp.where(mask[:, :, :, None], x, 0)
   for l in range(len(layer_params)):
     kv[l], x = jax.named_call(fprop_layer, name=f'L_{l}')(
         layer_params[l], kv[l], x, t0, i, mask)
   x = jax.nn.normalize(x) * fnorm_scale + fnorm_bias
   return kv, x
 
+def beamsearch(x, wte, beams, old_score=None):
+  logits = jnp.einsum('bwte,ve->bwtv', x, wte)
+
+  if old_score is not None:
+    logits = logits + old_score[:, :, :, None]
+
+  w = logits.shape[1]
+  t = logits.shape[2]
+  v = logits.shape[3]
+
+  logits = jnp.transpose(logits, (0, 2, 1, 3)) # btwv
+  logits = jax.lax.collapse(logits, 2, 4) # bt[wv]
+  score, ind = jax.lax.top_k(logits, beams) # btw
+
+  score = jnp.transpose(score, (0, 2, 1)) # bwt
+  ind = jnp.transpose(ind, (0, 2, 1)) # bwt
+
+  # Split the indices between which beam was selected and what the next token is.
+  prev = ind // v
+  nxt = ind % v
+  return nxt, prev, score
 
 def greedy(x, wte):
-  logits = jnp.einsum('bte,ve->btv', x, wte)
-  return jnp.argmax(logits, axis=-1)
+  logits = jnp.einsum('bwte,ve->bwtv', x, wte)
+  assert logits.shape[1] == 1
+  ind = jnp.argmax(logits, -1)
+  score = logits[np.arange(logits.shape[0]), :, -1, ind]
+  return ind, np.zeros(ind.shape, jnp.int32), score
 
 
 @functools.partial(jax.jit, donate_argnums=1)
 def encode(params, kv, prompt, i, t):
-  iota = jnp.arange(prompt.shape[1])[None, :]
-  length = t[:, None]
+  iota = jnp.arange(prompt.shape[1])[None, None, :]
+  length = t[:, None, None]
   mask = jnp.where(iota < length, 1, 0)
+  
+  # Initially we only have one beam to populate.
+  prompt = prompt[:, None, :]
 
   kv, y = fprop(params, kv, prompt, jnp.array([0], dtype=jnp.int32), i, mask)
-  y = y [jnp.arange(t.shape[0]), t-1, :][:, None, :]
-  return kv, greedy(y, params[0])
+  y = y [jnp.arange(t.shape[0]), :, t-1, :]
+  y = y[:, :, None, :]
 
-@jax.jit
-def encode_batch(params, x):
-  return fprop(params, [None] * len(params[2]), x, None, None, None)[1]
+  return kv, *beamsearch(y, params[0], kv[0].shape[2])
+  # return kv, *greedy(y, params[0])
 
 @functools.partial(jax.jit)
-def decode(params, kv, x, t):
-  _, T = x.shape
+def decode(params, kv, x, y, s, t):
+  _, _, T = x.shape
   assert T == 1
+
+  # Select the appropriate beams
+  kv = [m[:, jnp.arange(m.shape[1]), y[:, :, 0]] for m in kv]
+
   kv, y = fprop(params, kv, x, t, None, None)
-  return kv, greedy(y, params[0])
+  return kv, *beamsearch(y, params[0], kv[0].shape[2], s)
 
 
 # order is (L=length, E=embed, F=ffn, Q=qkv, H=heads, V=vocab)

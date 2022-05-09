@@ -14,6 +14,7 @@ import builtins
 import itertools
 import jax
 import jax.numpy as jnp
+import numpy
 import pathlib
 import transformers
 
@@ -42,31 +43,46 @@ class GPT2RealWeightsTest(parameterized.TestCase):
     super().setUp()
 
   @parameterized.parameters(*itertools.product(
-    ["cpu", "iree"]))
+    ["cpu"]))
   def test_batch_one(self, backend):
     dtype = jnp.float32
     S = 64
     if dtype == jnp.bfloat16 and jax.devices()[0].device_kind.lower() == 'cpu':
       self.skipTest('bf16 decoding on CPU is broken')
     B, T = 1, 1  # T is one decode step; S is encoding/cache length
+    W = 4 # W is the beam search width
     L, _, _, Q, H, _ = model.model_sizes[self.model_name]
     params = jax.tree_map(lambda x: jnp.asarray(x, dtype=dtype), self.params)
-    kv = model.init_kv(B, S, L, Q, H, dtype=dtype)  # assume same dtype for now
+    kv = model.init_kv(B, W, S, L, Q, H, dtype=dtype)  # assume same dtype for now
 
     encode = jax.jit(model.encode, backend=backend)
     decode = jax.jit(model.decode, backend=backend)
 
-    string = 'zero one two three four'
+    # string = 'zero one two three four'
+    string = 'when in the course'
     prompt = jnp.array(self.tokenizer(string)['input_ids'])[None, :]
     t = jnp.array([prompt.shape[1]], dtype=jnp.int32)
     t0 = jnp.zeros((B,), dtype=jnp.int32)
-    t0 = t0.at[0].set(5)
-    kv, x0 = encode(params, kv, prompt, 0, t)
-    kv, x1 = decode(params, kv, x0, t0 + 0)
-    kv, x2 = decode(params, kv, x1, t0 + 1)
-    self.assertEqual(self.tokenizer.decode(int(x0[0, 0])), ' five')
-    self.assertEqual(self.tokenizer.decode(int(x1[0, 0])), ' six')
-    self.assertEqual(self.tokenizer.decode(int(x2[0, 0])), ' seven')
+    t0 = t0.at[0].set(prompt.shape[1])
+
+    kv, x0, y0, score = encode(params, kv, prompt, 0, t)
+    # x0 = numpy.asarray(x0)
+    print("Encode Results")
+    print(y0)
+    print(", ".join([f'"{self.tokenizer.decode(int(x))}"' for x in numpy.nditer(x0)]))
+    print(score)
+
+    kv, x1, y1, score = decode(params, kv, x0, y0, score, t0 + 0)
+    print("Decode Results")
+    print(y1)
+    print(", ".join([f'"{self.tokenizer.decode(int(x))}"' for x in numpy.nditer(x1)]))
+    print(score)
+
+    kv, x2, y2, score = decode(params, kv, x1, y1, score, t0 + 1)
+    print("Decode Results")
+    print(y2)
+    print(", ".join([f'"{self.tokenizer.decode(int(x))}"' for x in numpy.nditer(x2)]))
+    print(score)
 
 if __name__ == '__main__':
   absltest.main()
