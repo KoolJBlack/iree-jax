@@ -25,44 +25,22 @@ from iree.jax import kernel, like, Program
 
 logging.basicConfig(level=logging.DEBUG)
 
-x = jnp.ones((3, 4), jnp.float32) * 4.0
-b = jnp.ones((3, 4), jnp.float32)
-
-Params = namedtuple("Params", "x,b")
-
-params = Params(x, b)
+_x = jnp.ones((4, 1024), jnp.float32)
 
 
 class TrivialKernel(Program):
-
-  _params = params
-
-  # Create an alias of part of the tree so we can easily assign to it.
-  _x = params.x
-
-  def get_params(self):
-    return self._params
-
-  def run(self, multiplier=like(x)):
-    result = self._linear(multiplier, self._params.x, self._params.b)
-    self._x = result
-    return result
-
-  def set_params(self, new_params=like(params)):
-    self._params = new_params
+  def test_topk(self, x=like(_x)):
+    return self._topk(x)
 
   @kernel
-  def _linear(m, x, b):
-    return m * x + b
+  def _topk(x):
+    return jax.lax.top_k(x, 10)
 
 
 # CHECK: module @trivial_kernel
 m = TrivialKernel()
 print(Program.get_mlir_module(m))
 
-print("Initial params:", m.get_params())
-# TODO: Runtime should be able to directly take Jax arrays.
-update = np.asarray(jnp.ones_like(x))
-print("Run:", m.run(update))
-print("Run:", m.run(update + 2.0))
-print("Updated params:", m.get_params())
+x = np.random.random(_x.shape).astype(_x.dtype)
+print("Run:", [a.to_host() for a in m.test_topk(x)])
+
