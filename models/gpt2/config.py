@@ -7,8 +7,8 @@ import pathlib
 
 assets_dir = path.join(pathlib.Path(__file__).parent.resolve(), "assets")
 
-flags.DEFINE_string('binary_path', '/tmp/gpt2.vmfb', 'Path for binary')
-flags.DEFINE_string('ir_path', '/tmp/gpt2.mlir', 'Path for IR')
+flags.DEFINE_string('binary_path', '/usr/local/google/home/kooljblack/Code/iree-jax/models/gpt2/data/gpt2.vmfb', 'Path for binary')
+flags.DEFINE_string('ir_path', '/usr/local/google/home/kooljblack/Code/iree-jax/models/gpt2/data/gpt2.mlir', 'Path for IR')
 flags.DEFINE_string('assets_path', assets_dir, 'Path for assets dir')
 
 # Create a tuple with model configuration details as follows:

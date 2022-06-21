@@ -171,7 +171,15 @@ def beamsearch(x, wte, beams, old_score=None):
 
   logits = jnp.transpose(logits, (0, 2, 1, 3)) # btwv
   logits = jax.lax.collapse(logits, 2, 4) # bt[wv]
-  score, ind = jax.lax.top_k(logits, beams) # btw
+  print(f"logits shape (pre pad): {logits.shape} and bemas: {beams}")
+  # logits shape: (1, 1, 50257) and bemas: 4
+  blocking_size = 64
+  pad_width = (blocking_size - (logits.shape[2] % blocking_size)) % logits.shape[2]
+  # pad_width= 47 #Padding added at the end of logits to make it divisible by some nice number
+  pad_width_list = [[0,0], [0,0], [0, pad_width]]
+  padded_logits = jax.numpy.pad(logits, pad_width_list, mode="constant", constant_values=np.NINF)
+  print(f"logits shape (after pad): {padded_logits.shape} and bemas: {beams}")
+  score, ind = jax.lax.top_k(padded_logits, beams) # btw
 
   score = jnp.transpose(score, (0, 2, 1)) # bwt
   ind = jnp.transpose(ind, (0, 2, 1)) # bwt
